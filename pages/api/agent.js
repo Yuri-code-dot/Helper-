@@ -1,7 +1,3 @@
-import Groq from "groq-sdk";
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
 const SYSTEM_PROMPT = `You are an autonomous GitHub agent. The user gives you natural language commands and you execute them using the GitHub REST API.
 
 Respond ONLY with a valid JSON object, no markdown, no explanation. Format:
@@ -38,11 +34,10 @@ CRITICAL RULES — NEVER BREAK THESE:
 - For adding topics use PUT /repos/{OWNER}/{repo}/topics with body: { "names": ["topic1"] }
 - For creating a release use POST /repos/{OWNER}/{repo}/releases
 - For starring a repo use PUT /user/starred/{OWNER}/{repo} with empty body
-- For unstarring use DELETE /user/starred/{OWNER}/{repo}
 - For forking use POST /repos/{OWNER}/{repo}/forks
 - For listing repos use GET /user/repos?per_page=5
 - Steps execute in order
-- If user wants code generated and pushed set generate_code.needed to true
+- If user wants code generated and pushed set generate_code.needed to true and generate_code.prompt should be very detailed
 - Only return valid JSON, nothing else`;
 
 async function callGitHub(method, endpoint, body, token, owner) {
@@ -64,6 +59,26 @@ async function callGitHub(method, endpoint, body, token, owner) {
   return { ok: res.ok, status: res.status, data };
 }
 
+async function callAI(messages, maxTokens = 1000) {
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://helper-chi-one.vercel.app",
+      "X-Title": "GitHub Agent",
+    },
+    body: JSON.stringify({
+      model: "qwen/qwen3-coder-480b-a35b:free",
+      messages,
+      temperature: 0.1,
+      max_tokens: maxTokens,
+    }),
+  });
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -74,23 +89,19 @@ export default async function handler(req, res) {
   if (!token) return res.status(500).json({ error: "GITHUB_PAT not configured" });
 
   try {
+    // Get GitHub username
     const userRes = await fetch("https://api.github.com/user", {
       headers: { Authorization: `Bearer ${token}`, "User-Agent": "github-agent" },
     });
     const userData = await userRes.json();
     const owner = userData.login;
 
-    const completion = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: command },
-      ],
-      temperature: 0.1,
-      max_tokens: 1000,
-    });
+    // Plan steps with Qwen3 Coder
+    const raw = await callAI([
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: command },
+    ]);
 
-    const raw = completion.choices[0]?.message?.content || "";
     let plan;
     try {
       plan = JSON.parse(raw.replace(/```json|```/g, "").trim());
@@ -98,22 +109,17 @@ export default async function handler(req, res) {
       return res.status(200).json({ thoughts: "Done", steps: [], results: [], summary: raw });
     }
 
-    // Generate code if needed
+    // Generate code if needed using Qwen3 Coder
     if (plan.generate_code?.needed) {
-      const codeRes = await groq.chat.completions.create({
-        model: "llama-3.1-8b-instant",
-        messages: [
-          {
-            role: "system",
-            content: "You are a code generator. Return ONLY the raw code, no explanation, no markdown backticks, no comments.",
-          },
-          { role: "user", content: plan.generate_code.prompt },
-        ],
-        max_tokens: 2000,
-      });
-      const code = codeRes.choices[0]?.message?.content || "";
-      const base64 = Buffer.from(code).toString("base64");
+      const code = await callAI([
+        {
+          role: "system",
+          content: "You are an expert code generator. Return ONLY the raw code, no explanation, no markdown backticks, no comments. Write clean, complete, production-ready code.",
+        },
+        { role: "user", content: plan.generate_code.prompt },
+      ], 4000);
 
+      const base64 = Buffer.from(code).toString("base64");
       plan.steps.push({
         description: `Push ${plan.generate_code.filename} to ${plan.generate_code.repo}`,
         method: "PUT",
@@ -132,15 +138,10 @@ export default async function handler(req, res) {
       results.push({ step, result });
     }
 
-    // Simple summary without extra Groq call
+    // Build summary
     const succeeded = results.filter(r => r.result.ok).length;
     const failed = results.filter(r => !r.result.ok).length;
-
-    // Extract useful URLs from results
-    const urls = results
-      .map(r => r.result.data?.html_url)
-      .filter(Boolean);
-
+    const urls = results.map(r => r.result.data?.html_url).filter(Boolean);
     const summaryText = `Done! ${succeeded} step(s) succeeded${failed > 0 ? `, ${failed} failed` : ""}${urls.length > 0 ? `. Check it out: ${urls.join(", ")}` : ". Check your GitHub!"}`;
 
     return res.status(200).json({
