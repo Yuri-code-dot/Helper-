@@ -67,7 +67,7 @@ export default async function handler(req, res) {
     const owner = userData.login;
 
     const completion = await groq.chat.completions.create({
-      model: "llama3-8b-8192",
+      model: "llama-3.1-8b-instant",
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: command },
@@ -84,10 +84,9 @@ export default async function handler(req, res) {
       return res.status(200).json({ thoughts: "Done", steps: [], results: [], summary: raw });
     }
 
-    // Generate code if needed
     if (plan.generate_code?.needed) {
       const codeRes = await groq.chat.completions.create({
-        model: "llama3-8b-8192",
+        model: "llama-3.1-8b-instant",
         messages: [
           { role: "system", content: "You are a code generator. Return ONLY the raw code, no explanation, no markdown backticks." },
           { role: "user", content: plan.generate_code.prompt },
@@ -97,7 +96,6 @@ export default async function handler(req, res) {
       const code = codeRes.choices[0]?.message?.content || "";
       const base64 = Buffer.from(code).toString("base64");
 
-      // Add push step
       plan.steps.push({
         description: `Push ${plan.generate_code.filename} to ${plan.generate_code.repo}`,
         method: "PUT",
@@ -116,7 +114,7 @@ export default async function handler(req, res) {
     }
 
     const summary = await groq.chat.completions.create({
-      model: "llama3-8b-8192",
+      model: "llama-3.1-8b-instant",
       messages: [
         { role: "system", content: "Summarize the GitHub API results concisely. Include any URLs. Be brief and friendly." },
         { role: "user", content: `Command: "${command}"\nResults: ${JSON.stringify(results, null, 2)}` },
