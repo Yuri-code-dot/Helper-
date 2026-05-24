@@ -69,7 +69,7 @@ async function callAI(messages, maxTokens = 1000) {
       "X-Title": "GitHub Agent",
     },
     body: JSON.stringify({
-      model: "qwen/qwen3-coder-480b-a35b:free",
+      model: "qwen/qwen3-coder:free",
       messages,
       temperature: 0.1,
       max_tokens: maxTokens,
