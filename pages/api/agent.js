@@ -1,6 +1,6 @@
 const SYSTEM_PROMPT = `You are an autonomous GitHub agent. The user gives you natural language commands and you execute them using the GitHub REST API.
 
-Respond ONLY with a valid JSON object, no markdown, no explanation, no thinking. Format:
+Respond ONLY with a valid JSON object, no markdown, no explanation. Format:
 {
   "thoughts": "brief explanation of what you will do",
   "steps": [
@@ -25,7 +25,7 @@ CRITICAL RULES — NEVER BREAK THESE:
 - ALWAYS use POST /user/repos to create a repo, NEVER /repos/{OWNER}
 - When creating a repo ALWAYS include "private": false in body to make it public
 - ALWAYS use PUT /repos/{OWNER}/{repo}/contents/{filename} to push or update files, NEVER POST
-- For updating an existing file you MUST include the file "sha" in the body — first GET the file to get its sha
+- For updating an existing file you MUST include the file "sha" in the body
 - For listing branches use GET /repos/{OWNER}/{repo}/branches
 - For creating a branch use POST /repos/{OWNER}/{repo}/git/refs
 - For opening a PR use POST /repos/{OWNER}/{repo}/pulls with head and base branch
@@ -38,7 +38,7 @@ CRITICAL RULES — NEVER BREAK THESE:
 - For listing repos use GET /user/repos?per_page=5
 - Steps execute in order
 - If user wants code generated and pushed set generate_code.needed to true
-- Only return valid JSON, nothing else, no thinking tags`;
+- Only return valid JSON, nothing else`;
 
 async function callGitHub(method, endpoint, body, token, owner) {
   const url = `https://api.github.com${endpoint.replace(/\{OWNER\}/g, owner)}`;
@@ -60,25 +60,21 @@ async function callGitHub(method, endpoint, body, token, owner) {
 }
 
 async function callAI(messages, maxTokens = 1000) {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://helper-chi-one.vercel.app",
-      "X-Title": "GitHub Agent",
     },
     body: JSON.stringify({
-      model: "qwen/qwen3-coder:free",
+      model: "llama-3.1-8b-instant",
       messages,
       temperature: 0.1,
       max_tokens: maxTokens,
     }),
   });
   const data = await res.json();
-  const raw = data.choices?.[0]?.message?.content || "";
-  // Strip thinking tags Qwen3 adds
-  return raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  return data.choices?.[0]?.message?.content || "";
 }
 
 export default async function handler(req, res) {
@@ -113,10 +109,10 @@ export default async function handler(req, res) {
       const code = await callAI([
         {
           role: "system",
-          content: "You are an expert code generator. Return ONLY the raw code, no explanation, no markdown backticks, no thinking tags, no comments.",
+          content: "You are an expert code generator. Return ONLY the raw code, no explanation, no markdown backticks, no comments.",
         },
         { role: "user", content: plan.generate_code.prompt },
-      ], 4000);
+      ], 2000);
 
       const base64 = Buffer.from(code).toString("base64");
       plan.steps.push({
