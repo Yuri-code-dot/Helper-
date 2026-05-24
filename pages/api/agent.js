@@ -1,6 +1,6 @@
 const SYSTEM_PROMPT = `You are an autonomous GitHub agent. The user gives you natural language commands and you execute them using the GitHub REST API.
 
-Respond ONLY with a valid JSON object, no markdown, no explanation. Format:
+Respond ONLY with a valid JSON object, no markdown, no explanation, no thinking. Format:
 {
   "thoughts": "brief explanation of what you will do",
   "steps": [
@@ -37,8 +37,8 @@ CRITICAL RULES — NEVER BREAK THESE:
 - For forking use POST /repos/{OWNER}/{repo}/forks
 - For listing repos use GET /user/repos?per_page=5
 - Steps execute in order
-- If user wants code generated and pushed set generate_code.needed to true and generate_code.prompt should be very detailed
-- Only return valid JSON, nothing else`;
+- If user wants code generated and pushed set generate_code.needed to true
+- Only return valid JSON, nothing else, no thinking tags`;
 
 async function callGitHub(method, endpoint, body, token, owner) {
   const url = `https://api.github.com${endpoint.replace(/\{OWNER\}/g, owner)}`;
@@ -76,7 +76,9 @@ async function callAI(messages, maxTokens = 1000) {
     }),
   });
   const data = await res.json();
-  return data.choices?.[0]?.message?.content || "";
+  const raw = data.choices?.[0]?.message?.content || "";
+  // Strip thinking tags Qwen3 adds
+  return raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 }
 
 export default async function handler(req, res) {
@@ -89,14 +91,12 @@ export default async function handler(req, res) {
   if (!token) return res.status(500).json({ error: "GITHUB_PAT not configured" });
 
   try {
-    // Get GitHub username
     const userRes = await fetch("https://api.github.com/user", {
       headers: { Authorization: `Bearer ${token}`, "User-Agent": "github-agent" },
     });
     const userData = await userRes.json();
     const owner = userData.login;
 
-    // Plan steps with Qwen3 Coder
     const raw = await callAI([
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: command },
@@ -109,12 +109,11 @@ export default async function handler(req, res) {
       return res.status(200).json({ thoughts: "Done", steps: [], results: [], summary: raw });
     }
 
-    // Generate code if needed using Qwen3 Coder
     if (plan.generate_code?.needed) {
       const code = await callAI([
         {
           role: "system",
-          content: "You are an expert code generator. Return ONLY the raw code, no explanation, no markdown backticks, no comments. Write clean, complete, production-ready code.",
+          content: "You are an expert code generator. Return ONLY the raw code, no explanation, no markdown backticks, no thinking tags, no comments.",
         },
         { role: "user", content: plan.generate_code.prompt },
       ], 4000);
@@ -131,14 +130,12 @@ export default async function handler(req, res) {
       });
     }
 
-    // Execute steps
     const results = [];
     for (const step of plan.steps) {
       const result = await callGitHub(step.method, step.endpoint, step.body || {}, token, owner);
       results.push({ step, result });
     }
 
-    // Build summary
     const succeeded = results.filter(r => r.result.ok).length;
     const failed = results.filter(r => !r.result.ok).length;
     const urls = results.map(r => r.result.data?.html_url).filter(Boolean);
