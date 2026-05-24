@@ -11,7 +11,7 @@ Respond ONLY with a valid JSON object, no markdown, no explanation. Format:
     {
       "description": "what this step does",
       "method": "GET|POST|PATCH|DELETE|PUT",
-      "endpoint": "/repos/{OWNER}/{repo}",
+      "endpoint": "/user/repos",
       "body": {}
     }
   ],
@@ -23,13 +23,27 @@ Respond ONLY with a valid JSON object, no markdown, no explanation. Format:
   }
 }
 
-Rules:
+CRITICAL RULES — NEVER BREAK THESE:
 - Base URL is https://api.github.com
 - Use {OWNER} as placeholder for the authenticated GitHub username
+- ALWAYS use POST /user/repos to create a repo, NEVER /repos/{OWNER}
+- When creating a repo ALWAYS include "private": false in body to make it public
+- ALWAYS use PUT /repos/{OWNER}/{repo}/contents/{filename} to push or update files, NEVER POST
+- For updating an existing file you MUST include the file "sha" in the body — first GET the file to get its sha
+- For listing branches use GET /repos/{OWNER}/{repo}/branches
+- For creating a branch use POST /repos/{OWNER}/{repo}/git/refs
+- For opening a PR use POST /repos/{OWNER}/{repo}/pulls with head and base branch
+- For merging a PR use PUT /repos/{OWNER}/{repo}/pulls/{pull_number}/merge
+- For creating an issue use POST /repos/{OWNER}/{repo}/issues
+- For adding topics use PUT /repos/{OWNER}/{repo}/topics with body: { "names": ["topic1"] }
+- For creating a release use POST /repos/{OWNER}/{repo}/releases
+- For starring a repo use PUT /user/starred/{OWNER}/{repo} with empty body
+- For unstarring use DELETE /user/starred/{OWNER}/{repo}
+- For forking use POST /repos/{OWNER}/{repo}/forks
+- For listing repos use GET /user/repos?per_page=5
 - Steps execute in order
-- For pushing a file use PUT /repos/{OWNER}/{repo}/contents/{path} with body: { message, content (base64) }
-- If user wants code generated and pushed, set generate_code.needed to true
-- Only return JSON, nothing else`;
+- If user wants code generated and pushed set generate_code.needed to true
+- Only return valid JSON, nothing else`;
 
 async function callGitHub(method, endpoint, body, token, owner) {
   const url = `https://api.github.com${endpoint.replace(/\{OWNER\}/g, owner)}`;
@@ -84,11 +98,15 @@ export default async function handler(req, res) {
       return res.status(200).json({ thoughts: "Done", steps: [], results: [], summary: raw });
     }
 
+    // Generate code if needed
     if (plan.generate_code?.needed) {
       const codeRes = await groq.chat.completions.create({
         model: "llama-3.1-8b-instant",
         messages: [
-          { role: "system", content: "You are a code generator. Return ONLY the raw code, no explanation, no markdown backticks." },
+          {
+            role: "system",
+            content: "You are a code generator. Return ONLY the raw code, no explanation, no markdown backticks, no comments.",
+          },
           { role: "user", content: plan.generate_code.prompt },
         ],
         max_tokens: 2000,
@@ -107,26 +125,29 @@ export default async function handler(req, res) {
       });
     }
 
+    // Execute steps
     const results = [];
     for (const step of plan.steps) {
       const result = await callGitHub(step.method, step.endpoint, step.body || {}, token, owner);
       results.push({ step, result });
     }
 
-    const summary = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
-      messages: [
-        { role: "system", content: "Summarize the GitHub API results concisely. Include any URLs. Be brief and friendly." },
-        { role: "user", content: `Command: "${command}"\nResults: ${JSON.stringify(results, null, 2)}` },
-      ],
-      max_tokens: 500,
-    });
+    // Simple summary without extra Groq call
+    const succeeded = results.filter(r => r.result.ok).length;
+    const failed = results.filter(r => !r.result.ok).length;
+
+    // Extract useful URLs from results
+    const urls = results
+      .map(r => r.result.data?.html_url)
+      .filter(Boolean);
+
+    const summaryText = `Done! ${succeeded} step(s) succeeded${failed > 0 ? `, ${failed} failed` : ""}${urls.length > 0 ? `. Check it out: ${urls.join(", ")}` : ". Check your GitHub!"}`;
 
     return res.status(200).json({
       thoughts: plan.thoughts,
       steps: plan.steps,
       results,
-      summary: summary.choices[0]?.message?.content || "Done!",
+      summary: summaryText,
       owner,
     });
   } catch (err) {
